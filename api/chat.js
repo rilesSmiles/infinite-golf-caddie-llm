@@ -5,16 +5,22 @@
 
 import { KNOWLEDGE } from "../knowledge.js";
 
-// Free chat models, tried in order. (Avoid "openrouter/free": it can route to
-// safety-classifier models that reply "User Safety: safe" instead of chatting.)
+// Free chat models, tried one after another until one answers.
+// Free models get rate-limited or go offline often, so the list is long on purpose.
+// Set OPENROUTER_MODEL in Vercel to force a single model (for example a paid one).
 const MODELS = process.env.OPENROUTER_MODEL
   ? [process.env.OPENROUTER_MODEL]
   : [
       "google/gemma-4-31b-it:free",
-      "google/gemma-4-26b-a4b-it:free",
+      "minimax/minimax-m3.1-flash:free",
       "nvidia/nemotron-3-super-120b-a12b:free",
+      "google/gemma-4-26b-a4b-it:free",
+      "thinkingmachines/inkling-small:free",
+      "nvidia/nemotron-3.5-super-vl:free",
+      "openrouter/free",
+      "openrouter/free",
     ];
-const MODEL = MODELS[0];
+const TIME_BUDGET_MS = 25000;
 const MAX_QUESTION_CHARS = 1000;
 const MAX_HISTORY_TURNS = 12;
 const MAX_TURN_CHARS = 2000;
@@ -99,6 +105,36 @@ function send(res, reply, limited = false) {
   return res.status(200).json({ reply, limited });
 }
 
+async function callModel(model, messages) {
+  try {
+    const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        "HTTP-Referer": "https://infinitegolf.ca",
+        "X-Title": "Infinite Golf Chatbot",
+      },
+      body: JSON.stringify({ model, messages, max_tokens: 600, temperature: 0.5 }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      console.error(`OpenRouter ${model} error ${r.status}:`, data?.error?.message || "");
+      return { status: r.status };
+    }
+    const reply = data?.choices?.[0]?.message?.content;
+    // Skip empty replies and safety-classifier output ("User Safety: safe").
+    if (!reply || !reply.trim() || /^\s*(user|response)\s+safety\s*:/i.test(reply)) {
+      console.error(`OpenRouter ${model} unusable reply via ${data?.model || "?"}:`, String(reply).slice(0, 80));
+      return { status: 200 };
+    }
+    return { reply, status: 200 };
+  } catch (err) {
+    console.error(`OpenRouter ${model} request failed:`, err?.message || err);
+    return { status: 0 };
+  }
+}
+
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -153,47 +189,32 @@ export default async function handler(req, res) {
       { role: "user", content: question.slice(0, MAX_QUESTION_CHARS) },
     ];
 
-    const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-        "HTTP-Referer": "https://infinitegolf.ca",
-        "X-Title": "Infinite Golf Chatbot",
-      },
-      body: JSON.stringify({
-        model: MODEL,
-        ...(MODELS.length > 1 ? { models: MODELS } : {}),
-        messages,
-        max_tokens: 600,
-        temperature: 0.5,
-      }),
-    });
+    const started = Date.now();
+    let rateLimited = false;
+    let authError = false;
 
-    const data = await r.json().catch(() => ({}));
-
-    if (!r.ok) {
-      console.error("OpenRouter error:", r.status, JSON.stringify(data));
-      if (r.status === 429) {
-        return send(
-          res,
-          "We've had a busy day of questions and the chat needs a breather. Try again in a bit, or email info@infinitegolf.ca and we'll sort you out.",
-          true
-        );
+    for (const model of MODELS) {
+      if (Date.now() - started > TIME_BUDGET_MS) break;
+      const result = await callModel(model, messages);
+      if (result.reply) return send(res, tidyReply(result.reply));
+      if (result.status === 429) rateLimited = true;
+      if (result.status === 401 || result.status === 403) {
+        authError = true;
+        break;
       }
-      if (r.status === 401 || r.status === 403) {
-        return send(res, "Something's off on our end (not you). Give it another shot shortly, or email info@infinitegolf.ca.");
-      }
-      return send(res, "That one didn't go through. Mind trying again in a moment?");
     }
 
-    const reply = data?.choices?.[0]?.message?.content;
-    if (!reply || /^\s*(user|response)\s+safety\s*:/i.test(reply)) {
-      console.error("Empty reply:", JSON.stringify(data));
-      return send(res, "That one didn't go through. Mind trying again in a moment?");
+    if (authError) {
+      return send(res, "Something's off on our end (not you). Give it another shot shortly, or email info@infinitegolf.ca.");
     }
-
-    return send(res, tidyReply(reply));
+    if (rateLimited) {
+      return send(
+        res,
+        "We've had a busy stretch of questions and the chat needs a breather. Try again in a minute, or email info@infinitegolf.ca and we'll sort you out.",
+        true
+      );
+    }
+    return send(res, "That one didn't go through. Mind trying again in a moment?");
   } catch (err) {
     console.error("Server error:", err?.message || err);
     return send(res, "Something went sideways on our end. Give it another try in a moment!");
