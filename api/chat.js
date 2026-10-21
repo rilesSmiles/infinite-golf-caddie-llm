@@ -5,7 +5,16 @@
 
 import { KNOWLEDGE } from "../knowledge.js";
 
-const MODEL = process.env.OPENROUTER_MODEL || "openrouter/free";
+// Free chat models, tried in order. (Avoid "openrouter/free": it can route to
+// safety-classifier models that reply "User Safety: safe" instead of chatting.)
+const MODELS = process.env.OPENROUTER_MODEL
+  ? [process.env.OPENROUTER_MODEL]
+  : [
+      "google/gemma-4-31b-it:free",
+      "google/gemma-4-26b-a4b-it:free",
+      "nvidia/nemotron-3-super-120b-a12b:free",
+    ];
+const MODEL = MODELS[0];
 const MAX_QUESTION_CHARS = 1000;
 const MAX_HISTORY_TURNS = 12;
 const MAX_TURN_CHARS = 2000;
@@ -31,7 +40,8 @@ VOICE
 - Speak golfer: buddies (never "playing partners"), tryhards, ultra-twilight rounds. Humour comes from specifics golfers recognize, never from puns.
 - Write in full, natural sentences. Lead with the answer, then the useful detail.
 - Encourage, don't pressure. A friendly nudge to book is great; hard selling is not.
-- Never use em dashes. Never use "it's not X, it's Y" or "X isn't just Y" phrasing. Never stack short dramatic fragments. No corporate filler like "state-of-the-art", "exceptional experience", or "unforgettable".
+- Never use em dashes, en dashes, or spaced hyphens as punctuation; use commas, periods, or semicolons instead. Never use "it's not X, it's Y" or "X isn't just Y" phrasing.
+- Don't end replies with generic closers like "Is there anything else I can help you with?" or "Let me know if you have questions." End on the answer or a natural next step, like the booking link. Never stack short dramatic fragments. No corporate filler like "state-of-the-art", "exceptional experience", or "unforgettable".
 - Never talk down to people or explain golf basics like they're beginners.
 
 FORMAT
@@ -46,7 +56,7 @@ WHAT TO DO
 - When someone asks about events or corporate bookings, share the pricing and point them to the events page.
 - If you don't know something, or it's in the unconfirmed list, say so in one easy sentence and send them to info@infinitegolf.ca. Only share the phone number if they ask for one.
 - For booking problems, refunds, account or membership issues, or anything urgent, send them to info@infinitegolf.ca.
-- If someone asks whether anyone works there, whether it's staffed, or who's around late at night, do not describe staffing levels at all. Say the team is reachable at info@infinitegolf.ca and that cameras record throughout the space for everyone's safety, then move on.
+- If someone asks whether anyone works there, whether it's staffed, or who's around late at night, do not describe staffing levels at all, and don't say you "can't share" staffing details. Answer in two easy sentences that focus on the experience, for example: "Every booking is tied to a real person through Birrdi, and cameras record throughout the space, so it feels just as comfortable at 2am as it does at 2pm. If you ever need us, the team is reachable at info@infinitegolf.ca."
 - Never describe the venue as unstaffed, empty, unmonitored, or "no one watching".
 - Keep alcohol out of suggestions. The venue is BYO food and non-alcoholic drinks only.
 - If asked about competitors, stay classy: don't knock anyone, just share what we offer.
@@ -101,7 +111,7 @@ export default async function handler(req, res) {
       status: "ok",
       service: "Infinite Golf chatbot",
       keyConfigured: Boolean(process.env.OPENROUTER_API_KEY),
-      model: MODEL,
+      models: MODELS,
     });
   }
 
@@ -153,6 +163,7 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         model: MODEL,
+        ...(MODELS.length > 1 ? { models: MODELS } : {}),
         messages,
         max_tokens: 600,
         temperature: 0.5,
@@ -177,7 +188,7 @@ export default async function handler(req, res) {
     }
 
     const reply = data?.choices?.[0]?.message?.content;
-    if (!reply) {
+    if (!reply || /^\s*(user|response)\s+safety\s*:/i.test(reply)) {
       console.error("Empty reply:", JSON.stringify(data));
       return send(res, "That one didn't go through. Mind trying again in a moment?");
     }
